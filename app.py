@@ -99,9 +99,8 @@ try:
     st.subheader("📊 Live Scoreboard")
     
     # Create big live scoreboard text layout
-    st.markdown(f"<h1 style='text-align: center; color: #4F8BF9;'>{team_a} {goals_a} — {goals_b} {team_b}</h1>", unsafe_style_allowed=True)
-    st.markdown(f"<p style='text-align: center;'><b>Match Clock: {match_minute}'</b></p>", unsafe_style_allowed=True)
-    
+   st.markdown(f"<h1 style='text-align: center; color: #4F8BF9;'>{team_a} {goals_a} — {goals_b} {team_b}</h1>", unsafe_allow_html=True)
+st.markdown(f"<p style='text-align: center;'><b>Match Clock: {match_minute}'</b></p>", unsafe_allow_html=True)
     st.subheader("🔮 Win Probability (90 MIN)")
     
     # Render interactive columns mimicking the percentage bar layouts
