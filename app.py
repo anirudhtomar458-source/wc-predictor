@@ -3,37 +3,33 @@ import pandas as pd
 import numpy as np
 from xgboost import XGBClassifier
 from sklearn.preprocessing import LabelEncoder
+import requests
 
-# Set up clean web page configuration
-st.set_page_config(page_title="World Cup Live Predictor", page_icon="⚽", layout="centered")
+# Set page to wide layout for the side-by-side columns
+st.set_page_config(page_title="World Cup Live Predictor", page_icon="⚽", layout="wide")
 
-st.title("⚽ FIFA World Cup Live Match Predictor")
-st.write("Simulate live matches and watch the win probability scorecard shift in real-time.")
+# --- 🔑 YOUR RAPIDAPI KEY ---
+API_KEY = "5cba91e315msh16a9035f15e963ap164cb9jsn8919d5d6747c"
 
-# 1. Load Data & Train Baseline Model (Cached for speed optimization)
-# 1. Load Data & Train Baseline Model (Cached for performance)
+st.title("⚽ FIFA World Cup Dual-Engine Predictor")
+st.write("Track the actual live game metrics on the left, and simulate 'what-if' tactical adjustments on the right.")
+
+# 1. Load Data & Train Baseline Model
 @st.cache_data
 def load_and_train():
     df = pd.read_csv('fifa_world_cup_historical_dataset_1930_2026.csv')
     
-    # List of advanced features the model expects
     features = [
         'team_a_rating', 'team_b_rating', 'team_a_roll_xg', 'team_b_roll_xg',
         'team_a_market_value_m_eur', 'team_b_market_value_m_eur',
         'points_per_game_team_a', 'points_per_game_team_b', 'head_to_head_win_ratio_a'
     ]
     
-    # BULLETPROOF FIX: If your CSV is missing these columns, generate fallback data automatically
+    # Bulletproof fallback for missing columns
     for col in features:
         if col not in df.columns:
-            if 'rating' in col:
-                df[col] = 1500.0  # Default Elo rating
-            elif 'market_value' in col:
-                df[col] = 200.0   # Default market value in millions
-            else:
-                df[col] = 1.5     # Default multiplier for xG or points
+            df[col] = 1500.0 if 'rating' in col else (200.0 if 'market_value' in col else 1.5)
 
-    # Ensure the target outcome column exists for training
     if 'target_outcome' not in df.columns:
         df['target_outcome'] = 'Draw' 
 
@@ -43,172 +39,173 @@ def load_and_train():
     X = df[features]
     y = df['target_label']
     
-    # Train the model
     model = XGBClassifier(n_estimators=100, learning_rate=0.05, max_depth=4, random_state=42)
     model.fit(X, y)
     
     return model, df, features
 
 model, df, features = load_and_train()
-
-# DYNAMIC TEAM EXTRACTION: Extracts every team name automatically from the CSV columns
 all_teams = sorted(list(set(df['team_a'].unique()).union(set(df['team_b'].unique()))))
 
-# 2. Sidebar Interactive Controller Inputs
-st.sidebar.header("🕹️ Match Control Center")
-
-# Safe index lookups for defaults
-default_a = all_teams.index("Belgium") if "Belgium" in all_teams else 0
-default_b = all_teams.index("Senegal") if "Senegal" in all_teams else min(1, len(all_teams)-1)
-
-team_a = st.sidebar.selectbox("Select Team A", all_teams, index=default_a)
-team_b = st.sidebar.selectbox("Select Team B", all_teams, index=default_b)
+# 2. Team Selection
+st.markdown("### 🕹️ Global Match Selection")
+col_sel1, col_sel2 = st.columns(2)
+with col_sel1:
+    team_a = st.selectbox("Select Team A", all_teams, index=all_teams.index("France") if "France" in all_teams else 0)
+with col_sel2:
+    team_b = st.selectbox("Select Team B", all_teams, index=all_teams.index("Germany") if "Germany" in all_teams else 1)
 
 if team_a == team_b:
-    st.sidebar.error("Error: Please select two different teams.")
+    st.error("Please select two different international teams.")
+    st.stop()
 
-# Mode selection toggle switch
-is_live = st.sidebar.checkbox("🟢 Activate Live Match Mode", value=False)
+def get_team_baselines(name):
+    t_data = df[(df['team_a'] == name) | (df['team_b'] == name)]
+    if not t_data.empty:
+        l = t_data.sort_values(by='date').iloc[-1]
+        r = l['team_a_rating'] if l['team_a'] == name else l['team_b_rating']
+        m = l['team_a_market_value_m_eur'] if l['team_a'] == name else l['team_b_market_value_m_eur']
+        return r, m
+    return 1600, 200.0
 
-# Initialize live metrics to zero/neutral by default
-match_minute = 1
-goals_a, goals_b = 0, 0
-shots_a, shots_b = 0, 0
-sot_a, sot_b = 0, 0
-possession_a = 50
-pass_a, pass_b = 0, 0
-acc_a, acc_b = 80.0, 80.0
-fouls_a, fouls_b = 0, 0
-yc_a, yc_b = 0, 0
-rc_a, rc_b = 0, 0
-offsides_a, offsides_b = 0, 0
-corners_a, corners_b = 0, 0
+r_a, m_a = get_team_baselines(team_a)
+r_b, m_b = get_team_baselines(team_b)
 
-if is_live:
-    st.sidebar.markdown("### ⏱️ Match Clock & Score")
-    match_minute = st.sidebar.slider("Match Clock (Minutes)", min_value=1, max_value=90, value=45)
+# 3. Live Web API Fetcher (Cached for 60 seconds to protect your free limit)
+@st.cache_data(ttl=60)
+def fetch_live_match_data(t_a, t_b):
+    url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
+    headers = {"X-RapidAPI-Key": API_KEY, "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"}
     
-    col_g1, col_g2 = st.sidebar.columns(2)
-    with col_g1:
-        goals_a = st.number_input(f"{team_a} Goals", min_value=0, max_value=10, value=0)
-    with col_g2:
-        goals_b = st.number_input(f"{team_b} Goals", min_value=0, max_value=10, value=0)
-
-    st.sidebar.markdown("### 📊 Live Match Stats")
-    
-    possession_a = st.sidebar.slider(f"{team_a} Possession %", min_value=15, max_value=85, value=50)
-    possession_b = 100 - possession_a
-    
-    col_s1, col_s2 = st.sidebar.columns(2)
-    with col_s1:
-        shots_a = st.number_input(f"{team_a} Total Shots", min_value=0, max_value=40, value=5)
-        sot_a = st.number_input(f"{team_a} Shots on Target", min_value=0, max_value=20, value=2)
-    with col_s2:
-        shots_b = st.number_input(f"{team_b} Total Shots", min_value=0, max_value=40, value=4)
-        sot_b = st.number_input(f"{team_b} Shots on Target", min_value=0, max_value=20, value=1)
+    try:
+        response = requests.get(url, headers=headers, params={"live": "all"})
+        data = response.json()
         
-    col_p1, col_p2 = st.sidebar.columns(2)
-    with col_p1:
-        pass_a = st.number_input(f"{team_a} Total Passes", min_value=0, max_value=1000, value=200)
-        acc_a = st.slider(f"{team_a} Pass Accuracy %", min_value=40.0, max_value=100.0, value=80.0)
-    with col_p2:
-        pass_b = st.number_input(f"{team_b} Total Passes", min_value=0, max_value=1000, value=200)
-        acc_b = st.slider(f"{team_b} Pass Accuracy %", min_value=40.0, max_value=100.0, value=80.0)
+        for match in data.get("response", []):
+            home = match["teams"]["home"]["name"]
+            away = match["teams"]["away"]["name"]
+            
+            # Check if selected teams match the live API feed
+            if (t_a in home or t_b in home) and (t_a in away or t_b in away):
+                minute = match["fixture"]["status"]["elapsed"]
+                
+                # Check for Extra Time formatting
+                extra_time = 0
+                if minute > 90:
+                    extra_time = minute - 90
+                    minute = 90
+                
+                return {
+                    "status": "LIVE",
+                    "minute": minute,
+                    "extra_time": extra_time,
+                    "goals_a": match["goals"]["home"],
+                    "goals_b": match["goals"]["away"],
+                    "rc_a": 0, 
+                    "rc_b": 0,
+                    "poss_a": 50
+                }
+        return {"status": "NOT_PLAYING"}
+    except:
+        return {"status": "ERROR"}
 
-    col_d1, col_d2 = st.sidebar.columns(2)
-    with col_d1:
-        fouls_a = st.number_input(f"{team_a} Fouls", min_value=0, max_value=30, value=5)
-        yc_a = st.number_input(f"{team_a} Yellow Cards", min_value=0, max_value=5, value=0)
-        rc_a = st.number_input(f"{team_a} Red Cards", min_value=0, max_value=4, value=0)
-        offsides_a = st.number_input(f"{team_a} Offsides", min_value=0, max_value=10, value=1)
-        corners_a = st.number_input(f"{team_a} Corners", min_value=0, max_value=20, value=2)
-    with col_d2:
-        fouls_b = st.number_input(f"{team_b} Fouls", min_value=0, max_value=30, value=6)
-        yc_b = st.number_input(f"{team_b} Yellow Cards", min_value=0, max_value=5, value=0)
-        rc_b = st.number_input(f"{team_b} Red Cards", min_value=0, max_value=4, value=0)
-        offsides_b = st.number_input(f"{team_b} Offsides", min_value=0, max_value=10, value=1)
-        corners_b = st.number_input(f"{team_b} Corners", min_value=0, max_value=20, value=1)
-else:
-    st.info("ℹ️ App running in Pre-Match Baseline Mode. Turn on 'Activate Live Match Mode' in the sidebar to simulate match statistics.")
+live_data = fetch_live_match_data(team_a, team_b)
 
-# 3. Predictor Logic Core
-try:
-    # Safely pull records or provide fallback baseline dict structures if matchups are brand new
-    def get_team_stats(team_name):
-        team_data = df[(df['team_a'] == team_name) | (df['team_b'] == team_name)]
-        if not team_data.empty:
-            latest = team_data.sort_values(by='date').iloc[-1]
-            rating = latest['team_a_rating'] if latest['team_a'] == team_name else latest['team_b_rating']
-            roll_xg = latest['team_a_roll_xg'] if latest['team_a'] == team_name else latest['team_b_roll_xg']
-            mv = latest['team_a_market_value_m_eur'] if latest['team_a'] == team_name else latest['team_b_market_value_m_eur']
-            ppg = latest['points_per_game_team_a'] if latest['team_a'] == team_name else latest['points_per_game_team_b']
-            return rating, roll_xg, mv, ppg
-        return 1500, 1.3, 150.0, 1.5 # Global average fallback parameters
+# Fallbacks if match isn't live
+live_minute_api = live_data.get("minute", 0)
+live_xt_api = live_data.get("extra_time", 0)
+live_goals_a_api = live_data.get("goals_a", 0)
+live_goals_b_api = live_data.get("goals_b", 0)
+live_poss_a_api = live_data.get("poss_a", 50)
+live_rc_a_api = live_data.get("rc_a", 0)
+live_rc_b_api = live_data.get("rc_b", 0)
 
-    rating_a, roll_xg_a, mv_a, ppg_a = get_team_stats(team_a)
-    rating_b, roll_xg_b, mv_b, ppg_b = get_team_stats(team_b)
-    
-    input_data = pd.DataFrame([[rating_a, rating_b, roll_xg_a, roll_xg_b, mv_a, mv_b, ppg_a, ppg_b, 0.5]], columns=features)
+# Prediction Math Engine
+def compute_prediction(rating_a, rating_b, mv_a, mv_b, minute, extra_time, g_a, g_b, poss_a, rc_a, rc_b):
+    input_data = pd.DataFrame([[rating_a, rating_b, 1.5, 1.5, mv_a, mv_b, 1.8, 1.8, 0.5]], columns=features)
     base_probs = model.predict_proba(input_data)[0]
     p_draw, p_loss, p_win = base_probs[0], base_probs[1], base_probs[2]
     
-    # Advanced Live Statistics Weight Modifiers
-    if is_live:
-        time_factor = match_minute / 90.0
-        
-        score_diff = goals_a - goals_b
-        if score_diff > 0:
-            p_win += (0.45 * score_diff) * time_factor
-            p_loss -= (0.35 * score_diff) * time_factor
-        elif score_diff < 0:
-            p_loss += (0.45 * abs(score_diff)) * time_factor
-            p_win -= (0.35 * abs(score_diff)) * time_factor
-        else:
-            if match_minute > 70:
-                p_draw += 0.4 * time_factor
-                p_win -= 0.2 * time_factor
-                p_loss -= 0.2 * time_factor
+    total_minutes = minute + extra_time
+    time_factor = min(total_minutes / 90.0, 1.3) # Cap time factor for extra time
+    
+    score_diff = g_a - g_b
+    if score_diff > 0:
+        p_win += (0.45 * score_diff) * time_factor
+        p_loss -= (0.35 * score_diff) * time_factor
+    elif score_diff < 0:
+        p_loss += (0.45 * abs(score_diff)) * time_factor
+        p_win -= (0.35 * abs(score_diff)) * time_factor
+    else:
+        # If drawn and in extra time, draw probability spikes heavily
+        if total_minutes > 70:
+            p_draw += 0.4 * time_factor
+            p_win -= 0.2 * time_factor
+            p_loss -= 0.2 * time_factor
 
-        sot_diff = sot_a - sot_b
-        p_win += (sot_diff * 0.015)
-        p_loss -= (sot_diff * 0.015)
-        
-        poss_diff = possession_a - 50
-        p_win += (poss_diff * 0.002)
-        p_loss -= (poss_diff * 0.002)
-        
-        corners_diff = corners_a - corners_b
-        p_win += (corners_diff * 0.005)
-        
-        p_win -= (rc_a * 0.18)
-        p_loss -= (rc_b * 0.18)
-        p_win -= (yc_a * 0.02)
-        p_loss -= (yc_b * 0.02)
-
-    # Re-normalize probabilities array safely
+    p_win += ((poss_a - 50) * 0.002) - (rc_a * 0.18)
+    p_loss -= ((poss_a - 50) * 0.002) + (rc_b * 0.18)
+    
     raw_totals = np.clip([p_win, p_draw, p_loss], 0.01, 0.99)
-    normalized_probs = raw_totals / np.sum(raw_totals)
-    
-    # 4. Render Beautiful Scoreboard Layout (Fixed HTML Syntax)
-    st.markdown("---")
-    st.markdown(f"<h1 style='text-align: center; color: #4F8BF9;'>{team_a} {goals_a} — {goals_b} {team_b}</h1>", unsafe_allow_html=True)
-    st.markdown(f"<p style='text-align: center;'><b>Match Clock: {match_minute}'</b></p>", unsafe_allow_html=True)
-    
-    st.subheader("🔮 Win Probability Scorecard")
-    c1, c2, c3 = st.columns(3)
-    c1.metric(label=f"{team_a} Win", value=f"{normalized_probs[0]*100:.1f}%")
-    c2.metric(label="Draw / Extra Time", value=f"{normalized_probs[1]*100:.1f}%")
-    c3.metric(label=f"{team_b} Win", value=f"{normalized_probs[2]*100:.1f}%")
-    st.progress(float(normalized_probs[0]))
+    return raw_totals / np.sum(raw_totals)
 
-    if is_live:
-        st.subheader("📊 Match Statistics Comparison")
-        stats_comparison = pd.DataFrame({
-            f"{team_a}": [possession_a, shots_a, sot_a, pass_a, f"{acc_a}%", fouls_a, yc_a, rc_a, offsides_a, corners_a],
-            "Metric Vector": ["Possession %", "Shots", "Shots on Target", "Total Passes", "Pass Accuracy", "Fouls", "Yellow Cards", "Red Cards", "Offsides", "Corners"],
-            f"{team_b}": [possession_b, shots_b, sot_b, pass_b, f"{acc_b}%", fouls_b, yc_b, rc_b, offsides_b, corners_b]
-        }).set_index("Metric Vector")
-        st.table(stats_comparison)
+st.markdown("---")
 
-except Exception as e:
-    st.error(f"Prediction process encountered an unexpected error: {e}")
+# 4. DUAL COLUMN LAYOUT
+left_column, right_column = st.columns(2)
+
+# ========== LEFT COLUMN: REAL LIVE FEED ==========
+with left_column:
+    st.header("📡 Live Official Feed")
+    
+    if live_data["status"] == "LIVE":
+        st.success("🟢 LIVE MATCH DETECTED! Pulling real-time web data...")
+        time_display = f"{live_minute_api}'" + (f" + {live_xt_api}' ET" if live_xt_api > 0 else "")
+        st.subheader(f"⏱️ Game Status: {time_display}")
+    elif live_data["status"] == "ERROR":
+        st.warning("⚠️ API connection error. Showing baseline simulation.")
+        st.subheader("⏱️ Game Status: Pre-Match (0')")
+    else:
+        st.info("ℹ️ Teams not currently playing live. Showing baseline.")
+        st.subheader("⏱️ Game Status: Pre-Match (0')")
+    
+    st.markdown(f"<h2 style='text-align: center; color: #FF4B4B;'>{team_a} {live_goals_a_api} — {live_goals_b_api} {team_b}</h2>", unsafe_allow_html=True)
+    
+    live_probs = compute_prediction(r_a, r_b, m_a, m_b, live_minute_api, live_xt_api, live_goals_a_api, live_goals_b_api, live_poss_a_api, live_rc_a_api, live_rc_b_api)
+    
+    st.markdown("#### 🎯 Active Win Probability")
+    lc1, lc2, lc3 = st.columns(3)
+    lc1.metric(f"{team_a} Win", f"{live_probs[0]*100:.1f}%")
+    lc2.metric("Draw", f"{live_probs[1]*100:.1f}%")
+    lc3.metric(f"{team_b} Win", f"{live_probs[2]*100:.1f}%")
+    st.progress(float(live_probs[0]))
+
+# ========== RIGHT COLUMN: SANDBOX SIMULATOR ==========
+with right_column:
+    st.header("🎛️ Sandbox Simulator")
+    st.write("Override match events below to see how the model reacts.")
+    
+    sc_time1, sc_time2 = st.columns(2)
+    with sc_time1:
+        sim_minute = st.slider("Simulated Clock (Mins)", 1, 90, int(live_minute_api))
+    with sc_time2:
+        sim_xt = st.number_input("Extra Time (Mins)", min_value=0, max_value=30, value=int(live_xt_api))
+    
+    sc1, sc2 = st.columns(2)
+    with sc1:
+        sim_goals_a = st.number_input(f"Simulate {team_a} Goals", 0, 12, int(live_goals_a_api))
+        sim_rc_a = st.slider(f"Simulate {team_a} Red Cards", 0, 4, int(live_rc_a_api))
+    with sc2:
+        sim_goals_b = st.number_input(f"Simulate {team_b} Goals", 0, 12, int(live_goals_b_api))
+        sim_rc_b = st.slider(f"Simulate {team_b} Red Cards", 0, 4, int(live_rc_b_api))
+        
+    sim_poss_a = st.slider(f"Simulate {team_a} Possession %", 15, 85, int(live_poss_a_api))
+    
+    sandbox_probs = compute_prediction(r_a, r_b, m_a, m_b, sim_minute, sim_xt, sim_goals_a, sim_goals_b, sim_poss_a, sim_rc_a, sim_rc_b)
+    
+    st.markdown("#### 🔮 Sandbox Win Probability")
+    rc1, rc2, rc3 = st.columns(3)
+    rc1.metric(f"{team_a} Win", f"{sandbox_probs[0]*100:.1f}%")
+    rc2.metric("Draw", f"{sandbox_probs[1]*100:.1f}%")
+    rc3.metric(f"{team_b} Win", f"{sandbox_probs[2]*100:.1f}%")
+    st.progress(float(sandbox_probs[0]))
